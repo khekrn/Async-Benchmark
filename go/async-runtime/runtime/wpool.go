@@ -2,77 +2,64 @@ package runtime
 
 import (
 	"sync"
+
+	"github.com/khekrn/async/domain/model"
 )
 
-type WorkerPool interface {
-	Initiate()
-
-	TrySubmit(task func()) bool
-
-	StopAndWait()
-}
-
-type bufferWorkerPool struct {
+type Executor struct {
+	stateMachine *StateMachine
+	channel      chan model.WorkflowRequest
 	wg           sync.WaitGroup
 	stopChannels []chan struct{}
-	queue        chan func()
 	maxWorkers   int
-	maxCapacity  int
 }
 
-func New(maxWorkers, maxCapacity int) WorkerPool {
-	instance := &bufferWorkerPool{
+func NewExecutor(maxWorkers int) *Executor {
+	return &Executor{
+		stateMachine: NewStateMachine(),
+		channel:      make(chan model.WorkflowRequest),
 		maxWorkers:   maxWorkers,
-		maxCapacity:  maxCapacity,
-		queue:        make(chan func(), maxCapacity),
 		stopChannels: make([]chan struct{}, maxWorkers),
 	}
-	return instance
 }
 
-func (b *bufferWorkerPool) Initiate() {
-	for i := 0; i < b.maxWorkers; i++ {
-		b.startWorker(i)
-	}
-}
-
-func (b *bufferWorkerPool) startWorker(id int) {
-	b.wg.Add(1)
+func (e *Executor) startWorker(workerID int) {
+	e.wg.Add(1)
 	stop := make(chan struct{})
-	b.stopChannels[id] = stop
+	e.stopChannels[workerID] = stop
 
 	go func() {
-		defer b.wg.Done()
+		defer e.wg.Done()
 		for {
 			select {
-			case function, ok := <-b.queue:
+			case request, ok := <-e.channel:
 				if !ok {
 					return
 				}
-				function()
+				e.stateMachine.Run(request)
 			case <-stop:
 				return
 			}
 		}
 	}()
-
 }
 
-// StopAndWait implements WorkerPool.
-func (b *bufferWorkerPool) StopAndWait() {
-	for _, stop := range b.stopChannels {
+func (e *Executor) Start() {
+	for i := 0; i < e.maxWorkers; i++ {
+		e.startWorker(i)
+	}
+}
+
+func (e *Executor) Stop() {
+	for _, stop := range e.stopChannels {
 		close(stop)
 	}
-	b.wg.Wait()
-	close(b.queue)
+	e.wg.Wait()
+	close(e.channel)
 }
 
-// TrySubmit implements WorkerPool.
-func (b *bufferWorkerPool) TrySubmit(task func()) bool {
-	if len(b.queue) >= b.maxCapacity {
-		return false
-	}
-
-	b.queue <- task
-	return true
+func (e *Executor) ExecuteWorkflow(workflowRequest model.WorkflowRequest) {
+	go func() {
+		e.channel <- workflowRequest
+	}()
 }
